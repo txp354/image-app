@@ -1,0 +1,46 @@
+# --- Secrets & local config -------------------------------------------------
+# Real webhook URL and auth secret live here. Never commit them.
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# --- Dependencies -----------------------------------------------------------
+node_modules/
+.pnpm-store/
+
+# --- Build output & caches --------------------------------------------------
+dist/
+dist-ssr/
+build/
+coverage/
+.vite/
+.cache/
+*.tsbuildinfo
+
+# --- Logs -------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Editors & OS -----------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Local-only Claude Code settings ----------------------------------------
+.claude/settings.local.json
+
+# --- Local reference files (not part of the app) ----------------------------
+Screenshot*.png
