@@ -14,5 +14,5 @@ export default function generate(req, res) {
   if (handler) return handler(req, res);
   res.statusCode = 503;
   res.setHeader('Content-Type', 'application/json');
-  res.end(JSON.stringify({ error: 'Server is not configured. Set WEBHOOK_URL in the Vercel project settings.' }));
+  res.end(JSON.stringify({ error: 'Server is not configured. Check the environment variables in the Vercel project settings.' }));
 }

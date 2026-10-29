@@ -24,6 +24,15 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+let config;
+try {
+  config = loadConfig(process.env);
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}
+const handleGenerate = createGenerateHandler(config);
+
 const SECURITY_HEADERS = {
   'Content-Security-Policy': [
     "default-src 'self'",
@@ -31,7 +40,8 @@ const SECURITY_HEADERS = {
     "style-src 'self' https://fonts.googleapis.com",
     'font-src https://fonts.gstatic.com',
     "img-src 'self' blob: data:",
-    "connect-src 'self'",
+    // The browser talks to Supabase Auth directly.
+    `connect-src 'self' ${config.supabaseUrl}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -44,15 +54,6 @@ const SECURITY_HEADERS = {
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 };
-
-let config;
-try {
-  config = loadConfig(process.env);
-} catch (err) {
-  console.error(err.message);
-  process.exit(1);
-}
-const handleGenerate = createGenerateHandler(config);
 
 const server = createServer(async (req, res) => {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);

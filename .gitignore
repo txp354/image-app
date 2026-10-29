@@ -44,3 +44,6 @@ Desktop.ini
 
 # --- Local reference files (not part of the app) ----------------------------
 Screenshot*.png
+
+# mcp servers
+.mcp.json

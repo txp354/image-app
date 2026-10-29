@@ -1,5 +1,5 @@
-// POST /api/generate: validates the two uploads and forwards them to the n8n
-// webhook. The webhook URL and auth secret exist only on the server; the
+// POST /api/generate: checks the caller's Supabase session, validates the two
+// uploads and forwards them to the n8n webhook. The webhook URL and auth secret exist only on the server; the
 // browser never sees them. Used by both the Vite dev server (vite.config.ts)
 // and the production server (server/index.js).
 import { ALLOWED_TYPES, MAX_IMAGE_BYTES, sniffImageType } from '../shared/image-type.js';
@@ -23,12 +23,24 @@ export function loadConfig(env) {
   const authValue = env.WEBHOOK_AUTH_VALUE || '';
   if (authHeader && !authValue) errors.push('WEBHOOK_AUTH_VALUE is required when WEBHOOK_AUTH_HEADER is set');
 
+  let supabaseUrl;
+  try {
+    supabaseUrl = new URL(env.VITE_SUPABASE_URL ?? '');
+    if (supabaseUrl.protocol !== 'https:') errors.push('VITE_SUPABASE_URL must use https://');
+  } catch {
+    errors.push('VITE_SUPABASE_URL is missing or not a valid URL');
+  }
+  const supabaseKey = env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim() || '';
+  if (!supabaseKey) errors.push('VITE_SUPABASE_PUBLISHABLE_KEY is missing');
+
   if (errors.length) throw new Error(`Invalid server configuration:\n  - ${errors.join('\n  - ')}`);
 
   return {
     webhookUrl: webhookUrl.toString(),
     authHeader,
     authValue,
+    supabaseUrl: supabaseUrl.origin,
+    supabaseKey,
     allowedOrigins: (env.ALLOWED_ORIGINS || '')
       .split(',')
       .map((o) => o.trim().replace(/\/$/, ''))
@@ -69,6 +81,9 @@ export function createGenerateHandler(config) {
       res.setHeader('Retry-After', '30');
       return sendError(res, 503, 'The server is busy. Please try again shortly.');
     }
+
+    const user = await verifyUser(req, config);
+    if (!user) return sendError(res, 401, 'Please sign in to generate images.');
 
     inFlight++;
     try {
@@ -152,6 +167,33 @@ function sendError(res, status, message) {
     'X-Content-Type-Options': 'nosniff',
   });
   res.end(body);
+}
+
+/**
+ * Validates the request's Supabase access token by asking Supabase Auth for its
+ * user. This also rejects tokens of users who signed out or were deleted.
+ * Returns the user object, or null if the token is missing or invalid.
+ */
+async function verifyUser(req, config) {
+  const match = /^Bearer (\S+)$/.exec(req.headers.authorization || '');
+  if (!match) return null;
+  try {
+    const res = await fetch(`${config.supabaseUrl}/auth/v1/user`, {
+      headers: { apikey: config.supabaseKey, Authorization: `Bearer ${match[1]}` },
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      if (res.status !== 401 && res.status !== 403) console.error(`[generate] auth check returned HTTP ${res.status}`);
+      return null;
+    }
+    const user = await res.json();
+    return typeof user?.id === 'string' ? user : null;
+  } catch (err) {
+    console.error('[generate] auth check failed:', err?.message);
+    return null;
+  }
 }
 
 /** Browsers always send Origin on cross-origin and same-origin POSTs; block other sites from using the proxy. */

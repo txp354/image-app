@@ -9,7 +9,7 @@ Node server (`server/`) that proxies requests to n8n.
 ## Run
 
 ```sh
-cp .env.example .env   # then fill in WEBHOOK_URL (and the auth secret)
+cp .env.example .env   # then fill in the Supabase values and WEBHOOK_URL (and the auth secret)
 npm install
 npm run dev            # http://localhost:5173 (includes the /api/generate proxy)
 
@@ -22,10 +22,13 @@ after editing `.env`.
 
 ## Configuration
 
-All variables are server-side only and documented in `.env.example`.
+All variables are documented in `.env.example`. Only the two `VITE_SUPABASE_*` values reach the
+browser; they are public by design. Everything else is server-side only.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
+| `VITE_SUPABASE_URL` | yes | | Supabase project URL (`https://` only). Bundled into the client; also used by the server to verify sessions |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | yes | | Supabase publishable key (`sb_publishable_...`). Never use the secret/service_role key here |
 | `WEBHOOK_URL` | yes | | n8n production webhook (`https://` only; the server refuses to start otherwise) |
 | `WEBHOOK_AUTH_HEADER` | no | | Header name sent to n8n, e.g. `X-Webhook-Secret` |
 | `WEBHOOK_AUTH_VALUE` | if header set | | Shared secret for that header |
@@ -46,8 +49,24 @@ The browser only ever talks to its own origin. `WEBHOOK_URL` and the auth secret
 server and are never bundled into client code. **Do not add a `VITE_` prefix to them**, because
 Vite embeds every `VITE_*` variable into the public JavaScript.
 
+## Accounts
+
+Users sign up with name, email and password, and sign in with Supabase Auth
+(`src/components/AuthForm.tsx`). The app is hidden until they're signed in.
+- The name is sent as `full_name` user metadata. A database trigger copies it into
+  `public.profiles` (`id`, `full_name`, `created_at`), which has row-level security so users can only
+  read and update their own row.
+- The browser sends the Supabase access token to `/api/generate`, and the proxy checks it against
+  Supabase Auth (`/auth/v1/user`) before forwarding anything to n8n. Signed-out users get 401.
+- Supabase settings (Dashboard → Authentication):
+  - **URL Configuration**: set *Site URL* to the production domain and add
+    `http://localhost:5173` and the Vercel URL(s) to *Redirect URLs*. Confirmation links go there.
+  - **Email confirmation** is on by default. New users must click the emailed link before they can
+    sign in. Supabase's built-in mailer is heavily rate-limited, so configure custom SMTP for production.
+
 ## Security measures
 
+- `/api/generate` requires a valid Supabase session.
 - The webhook URL and secret live server-side only (`.env`, which is gitignored).
 - Optional shared-secret header sent to n8n (`WEBHOOK_AUTH_HEADER` / `WEBHOOK_AUTH_VALUE`).
 - `/api/generate` rejects requests whose `Origin` is not the app's own (or `ALLOWED_ORIGINS`).
@@ -86,6 +105,7 @@ The error banner shows the proxy's message:
 | "The image service returned an error (HTTP 404)" | Workflow not activated, or wrong webhook ID. |
 | "The image service returned an error (HTTP 401/403)" | Header Auth in n8n doesn't match `WEBHOOK_AUTH_*`. |
 | "The image service did not return an image" | Workflow doesn't end with Respond to Webhook → Binary File. Server log shows what came back. |
+| "Please sign in to generate images" / "Your session has expired" (401) | Missing or invalid Supabase token, or the server can't reach Supabase (check its logs). |
 | "Too many requests" | Rate limit hit; adjust `RATE_LIMIT_*`. |
 | "Origin not allowed" | Page served from an origin other than the one being called; add it to `ALLOWED_ORIGINS`. |
 
@@ -100,6 +120,7 @@ security headers.
 1. Import the GitHub repo in Vercel. `vercel.json` already sets the framework, build command
    and output directory.
 2. Project → Settings → Environment Variables:
+   - add `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` (needed at build time and by the function);
    - add `WEBHOOK_URL`;
    - add `WEBHOOK_AUTH_HEADER` / `WEBHOOK_AUTH_VALUE` if you use Header Auth;
    - add any optional limits.
@@ -110,6 +131,8 @@ security headers.
    - The response from n8n must also stay under 4.5 MB.
    - Rate limiting is per function instance, so it is a best-effort limit. `TRUST_PROXY` defaults to
      `true` here, because Vercel sets `X-Forwarded-For` itself.
+   - The CSP in `vercel.json` hardcodes the Supabase project URL in `connect-src`. Update it if the
+     project changes. (`server/index.js` builds it from `VITE_SUPABASE_URL`.)
 
 ### Any Node host
 

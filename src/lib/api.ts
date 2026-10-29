@@ -1,5 +1,6 @@
 import { ALLOWED_TYPES, sniffImageType } from '../../shared/image-type.js';
 import { prepareForUpload } from './resize';
+import { supabase } from './supabase';
 
 // Same-origin proxy (server/proxy.js). The real webhook URL never reaches the browser.
 const ENDPOINT = '/api/generate';
@@ -12,6 +13,10 @@ export interface GenerateResult {
 }
 
 export async function generateImage(file1: File, file2: File): Promise<GenerateResult> {
+  // getSession() refreshes an expired access token before returning it.
+  const { data } = await supabase.auth.getSession();
+  if (!data.session) throw new Error('Please sign in to generate images.');
+
   const [upload1, upload2] = await Promise.all([prepareForUpload(file1), prepareForUpload(file2)]);
   const formData = new FormData();
   formData.append('image1', upload1, 'image1');
@@ -28,6 +33,7 @@ export async function generateImage(file1: File, file2: File): Promise<GenerateR
         body: formData,
         signal: controller.signal,
         credentials: 'same-origin',
+        headers: { Authorization: `Bearer ${data.session.access_token}` },
       });
     } catch (err) {
       if (isAbort(err)) throw timeoutError();
@@ -67,6 +73,7 @@ async function readErrorMessage(res: Response): Promise<string> {
   } catch {
     // fall through: platform errors (e.g. Vercel's 404/413/504 pages) aren't our JSON
   }
+  if (res.status === 401) return 'Your session has expired. Please sign in again.';
   if (res.status === 404) return 'The image API was not found on this server (HTTP 404).';
   if (res.status === 413) return 'The images are too large to upload. Try smaller photos.';
   if (res.status === 504) return 'The server took too long to respond. Please try again.';

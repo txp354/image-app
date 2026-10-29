@@ -4,6 +4,8 @@ export interface ProxyConfig {
   webhookUrl: string;
   authHeader: string;
   authValue: string;
+  supabaseUrl: string;
+  supabaseKey: string;
   allowedOrigins: string[];
   trustProxy: boolean;
   rateLimitMax: number;

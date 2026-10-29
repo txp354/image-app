@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 There are no automated tests, so check the proxy with curl against a running server.
 - Send a real `Origin` header (`-H "Origin: http://localhost:5173"`); without one, the proxy returns 403.
 - Test images need real magic bytes. A PNG signature (`89 50 4E 47 0D 0A 1A 0A`) plus padding is enough.
+- `/api/generate` needs `-H "Authorization: Bearer <access token>"` from a signed-in user, or it returns 401.
 - To exercise the upstream path without triggering the paid n8n workflow, run `WEBHOOK_URL=https://httpbin.org/post PORT=3999 node server/index.js`. A successful request should then get a 502 "did not return an image", which proves forwarding and response validation work.
 - After `npm run build`, `grep -r n8n.cloud dist` must find nothing.
 
@@ -30,13 +31,14 @@ React 18 + TypeScript SPA (Vite 6, Tailwind v4 via `@tailwindcss/vite`, `lucide-
   - in dev, via `loadEnv(mode, cwd, '')` in `vite.config.ts`;
   - in prod, via `process.env` in `server/index.js`.
   - Never give them a `VITE_` prefix or import them from `src/`, because Vite inlines `VITE_*` into the bundle. After building, `grep -r n8n.cloud dist` should find nothing.
+  - The exceptions are `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY`. They are public by design, and both the client and `loadConfig()` read them. Never put a Supabase secret or service_role key anywhere.
 - **`server/proxy.js` is the single request handler**, mounted in three places:
   - the Vite dev plugin (`vite.config.ts`);
   - the Node server (`server/index.js`, `npm start`);
   - the Vercel serverless function (`api/generate.js`). Vercel never runs `server/index.js`.
   - Security headers are duplicated in `server/index.js` and `vercel.json`. Change both.
   - Vercel caps request and response bodies at 4.5 MB. That's why `src/lib/resize.ts` downscales uploads in the browser before `api.ts` sends them. Keep the per-image target under half that limit.
-  - It applies, in order: method, Origin, rate limit, concurrency cap, body size, multipart parse, per-field magic-byte check, then forwards to n8n.
+  - It applies, in order: method, Origin, rate limit, Supabase session check (`verifyUser`, Bearer token checked against `/auth/v1/user`), concurrency cap, body size, multipart parse, per-field magic-byte check, then forwards to n8n.
   - Upstream errors are logged; users get generic JSON `{ error }` messages.
   - Config is parsed and validated in `loadConfig()`, which throws on bad config: the prod server exits, and the dev plugin answers 503.
   - `server/proxy.d.ts` hand-types the JS module for `vite.config.ts`. Keep it in sync.
@@ -49,7 +51,8 @@ React 18 + TypeScript SPA (Vite 6, Tailwind v4 via `@tailwindcss/vite`, `lucide-
 - **Client state lives only in `App.tsx`.** The spec's `idle | ready | loading | success | error` state is derived, not stored.
   - `src/lib/api.ts` turns every failure into a user-readable `Error.message`, which the UI renders directly.
   - Object URLs: `ImageDropzone` creates and revokes its preview URL in an effect. `App` revokes the previous result URL through a ref when it changes and on unmount.
-- **Prod security headers** (CSP etc.) are set in `server/index.js` and `vercel.json`. They are not applied in dev, because Vite HMR needs inline scripts. If you add an external resource (font, CDN, analytics), update the CSP there.
+- **Auth** uses Supabase (`src/lib/supabase.ts`, `src/components/AuthForm.tsx`). `App.tsx` holds the session and renders `AuthForm` when signed out. `api.ts` attaches the access token. Sign-up stores the name as `full_name` metadata; a trigger copies it into `public.profiles` (RLS: own row only).
+- **Prod security headers** (CSP etc.) are set in `server/index.js` and `vercel.json`. `connect-src` includes the Supabase URL: built from env in `server/index.js`, hardcoded in `vercel.json`. They are not applied in dev, because Vite HMR needs inline scripts. If you add an external resource (font, CDN, analytics), update the CSP there.
 
 ## n8n gotchas
 
