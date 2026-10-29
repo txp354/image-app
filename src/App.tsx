@@ -5,14 +5,27 @@ import AuthForm from './components/AuthForm';
 import ImageDropzone from './components/ImageDropzone';
 import ResultViewer from './components/ResultViewer';
 import ErrorBanner from './components/ErrorBanner';
+import Paywall from './components/Paywall';
 import { generateImage } from './lib/api';
+import { hasPaidAccess, paymentLinkFor } from './lib/access';
 import { supabase } from './lib/supabase';
 
 type Status = 'idle' | 'ready' | 'loading' | 'success' | 'error';
+type Checkout = 'idle' | 'confirming' | 'pending';
+
+// Stripe redirects back here after payment; the webhook can land a few seconds later.
+const CHECKOUT_POLL_MS = 2_000;
+const CHECKOUT_POLL_TRIES = 30;
 
 export default function App() {
   // undefined until the stored session has been read, then a session or null.
   const [session, setSession] = useState<Session | null | undefined>(undefined);
+  // undefined until the purchase lookup for the signed-in user has finished.
+  const [hasAccess, setHasAccess] = useState<boolean | undefined>(undefined);
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [checkout, setCheckout] = useState<Checkout>(() =>
+    new URLSearchParams(window.location.search).get('checkout') === 'success' ? 'confirming' : 'idle',
+  );
   const [file1, setFile1] = useState<File | null>(null);
   const [file2, setFile2] = useState<File | null>(null);
   const [result, setResult] = useState<{ url: string; type: string } | null>(null);
@@ -24,6 +37,55 @@ export default function App() {
     const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
     return () => data.subscription.unsubscribe();
   }, []);
+
+  // Keyed on the user id, not the session object, which changes on every token refresh.
+  const userId = session?.user.id;
+  useEffect(() => {
+    setHasAccess(undefined);
+    setAccessError(null);
+    if (!userId) return;
+    let cancelled = false;
+    hasPaidAccess()
+      .then((paid) => !cancelled && setHasAccess(paid))
+      .catch((err: Error) => {
+        if (cancelled) return;
+        setAccessError(err.message);
+        setHasAccess(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  // After returning from Stripe, poll until the webhook has recorded the purchase.
+  useEffect(() => {
+    if (checkout !== 'confirming' || hasAccess === undefined) return;
+    if (hasAccess) {
+      setCheckout('idle');
+      return;
+    }
+    let tries = 0;
+    const id = setInterval(async () => {
+      tries++;
+      const paid = await hasPaidAccess().catch(() => false);
+      if (paid) {
+        clearInterval(id);
+        setAccessError(null);
+        setHasAccess(true);
+      } else if (tries >= CHECKOUT_POLL_TRIES) {
+        clearInterval(id);
+        setCheckout('pending');
+      }
+    }, CHECKOUT_POLL_MS);
+    return () => clearInterval(id);
+  }, [checkout, hasAccess]);
+
+  // Drop ?checkout=success once handled so a refresh doesn't restart the wait.
+  useEffect(() => {
+    if (checkout !== 'confirming' && window.location.search) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, [checkout]);
 
   // Revoke the previous result URL whenever it is replaced, and on unmount.
   const resultUrlRef = useRef<string | null>(null);
@@ -100,13 +162,21 @@ export default function App() {
         </div>
       </header>
 
-      {session === undefined ? null : !session ? (
+      {session === undefined || (session && hasAccess === undefined) ? null : !session ? (
         <main className="mx-auto max-w-6xl px-4 pb-16 pt-12 sm:px-6">
           <h1 className="text-center text-4xl font-medium sm:text-5xl">Welcome</h1>
           <p className="mx-auto mt-3 mb-10 max-w-md text-center text-muted">
             Sign in or create an account to use the virtual try-on studio.
           </p>
           <AuthForm />
+        </main>
+      ) : !hasAccess ? (
+        <main className="mx-auto max-w-6xl px-4 pb-16 pt-12 sm:px-6">
+          <h1 className="text-center text-4xl font-medium sm:text-5xl">Unlock the studio</h1>
+          <p className="mx-auto mt-3 mb-10 max-w-md text-center text-muted">
+            One payment gives your account unlimited access to the virtual try-on studio.
+          </p>
+          <Paywall paymentUrl={paymentLinkFor(session)} checkout={checkout} error={accessError} />
         </main>
       ) : (
         <main className="mx-auto max-w-6xl px-4 pb-16 pt-8 sm:px-6">

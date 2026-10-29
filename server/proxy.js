@@ -1,4 +1,4 @@
-// POST /api/generate: checks the caller's Supabase session, validates the two
+// POST /api/generate: checks the caller's Supabase session and paid access, validates the two
 // uploads and forwards them to the n8n webhook. The webhook URL and auth secret exist only on the server; the
 // browser never sees them. Used by both the Vite dev server (vite.config.ts)
 // and the production server (server/index.js).
@@ -84,6 +84,9 @@ export function createGenerateHandler(config) {
 
     const user = await verifyUser(req, config);
     if (!user) return sendError(res, 401, 'Please sign in to generate images.');
+    const access = await hasPaidAccess(user, config);
+    if (access === null) return sendError(res, 503, 'Could not check your purchase. Please try again.');
+    if (!access) return sendError(res, 402, 'Purchase access to start generating.');
 
     inFlight++;
     try {
@@ -172,14 +175,15 @@ function sendError(res, status, message) {
 /**
  * Validates the request's Supabase access token by asking Supabase Auth for its
  * user. This also rejects tokens of users who signed out or were deleted.
- * Returns the user object, or null if the token is missing or invalid.
+ * Returns { id, token }, or null if the token is missing or invalid.
  */
 async function verifyUser(req, config) {
   const match = /^Bearer (\S+)$/.exec(req.headers.authorization || '');
   if (!match) return null;
+  const token = match[1];
   try {
     const res = await fetch(`${config.supabaseUrl}/auth/v1/user`, {
-      headers: { apikey: config.supabaseKey, Authorization: `Bearer ${match[1]}` },
+      headers: { apikey: config.supabaseKey, Authorization: `Bearer ${token}` },
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),
     });
@@ -189,9 +193,35 @@ async function verifyUser(req, config) {
       return null;
     }
     const user = await res.json();
-    return typeof user?.id === 'string' ? user : null;
+    return typeof user?.id === 'string' ? { id: user.id, token } : null;
   } catch (err) {
     console.error('[generate] auth check failed:', err?.message);
+    return null;
+  }
+}
+
+/**
+ * Checks for an unrefunded row in public.purchases, written by the stripe-webhook
+ * Edge Function. Queries as the user, so RLS limits it to their own rows.
+ * Returns true/false, or null if the lookup failed (callers fail closed).
+ */
+async function hasPaidAccess(user, config) {
+  const query = `select=id&user_id=eq.${user.id}&refunded_at=is.null&limit=1`;
+  try {
+    const res = await fetch(`${config.supabaseUrl}/rest/v1/purchases?${query}`, {
+      headers: { apikey: config.supabaseKey, Authorization: `Bearer ${user.token}` },
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      console.error(`[generate] purchase check returned HTTP ${res.status}`);
+      return null;
+    }
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length > 0;
+  } catch (err) {
+    console.error('[generate] purchase check failed:', err?.message);
     return null;
   }
 }

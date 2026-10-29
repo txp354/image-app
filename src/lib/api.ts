@@ -74,6 +74,7 @@ async function readErrorMessage(res: Response): Promise<string> {
     // fall through: platform errors (e.g. Vercel's 404/413/504 pages) aren't our JSON
   }
   if (res.status === 401) return 'Your session has expired. Please sign in again.';
+  if (res.status === 402) return 'Purchase access to start generating.';
   if (res.status === 404) return 'The image API was not found on this server (HTTP 404).';
   if (res.status === 413) return 'The images are too large to upload. Try smaller photos.';
   if (res.status === 504) return 'The server took too long to respond. Please try again.';

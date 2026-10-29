@@ -1,10 +1,14 @@
 # Try-On Studio
 
 Single-page client that uploads two images (`image1` = person, `image2` = garment) and shows
-the merged image returned by an n8n workflow.
+the merged image returned by an n8n workflow. Users must create an account (name, email,
+password), sign in, and pay a one-time $9.99 through a Stripe Payment Link before they can use it.
 
-Stack: Vite + React + TypeScript + Tailwind CSS v4 + lucide-react, plus a small dependency-free
-Node server (`server/`) that proxies requests to n8n.
+Stack: Vite + React + TypeScript + Tailwind CSS v4 + lucide-react, Supabase Auth
+(`@supabase/supabase-js`), Stripe Payment Links, plus a small dependency-free Node server (`server/`) that proxies
+requests to n8n.
+
+Production: https://image-app-beta-weld.vercel.app (Vercel, deployed from `main`).
 
 ## Run
 
@@ -20,15 +24,21 @@ npm start              # serve dist/ + proxy on http://127.0.0.1:3000
 Node 22.9+ is required (`npm start` uses `--env-file-if-exists`). Restart `npm run dev` / `npm start`
 after editing `.env`.
 
+If port 5173 is already taken (often by an old dev server), Vite silently moves to 5174 or higher.
+Sign-up confirmation links only return to URLs in Supabase's redirect list, which includes
+`http://localhost:5173`. Stop the old server, or run `npm run dev -- --port 5173 --strictPort` to fail
+instead of switching ports.
+
 ## Configuration
 
-All variables are documented in `.env.example`. Only the two `VITE_SUPABASE_*` values reach the
-browser; they are public by design. Everything else is server-side only.
+All variables are documented in `.env.example`. Only the `VITE_*` values reach the browser; they
+are public by design. Everything else is server-side only.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `VITE_SUPABASE_URL` | yes | | Supabase project URL (`https://` only). Bundled into the client; also used by the server to verify sessions |
 | `VITE_SUPABASE_PUBLISHABLE_KEY` | yes | | Supabase publishable key (`sb_publishable_...`). Never use the secret/service_role key here |
+| `VITE_STRIPE_PAYMENT_LINK_URL` | yes | | Stripe Payment Link (`https://buy.stripe.com/...`). Bundled into the client; without it the paywall shows "Payments are not configured yet" |
 | `WEBHOOK_URL` | yes | | n8n production webhook (`https://` only; the server refuses to start otherwise) |
 | `WEBHOOK_AUTH_HEADER` | no | | Header name sent to n8n, e.g. `X-Webhook-Secret` |
 | `WEBHOOK_AUTH_VALUE` | if header set | | Shared secret for that header |
@@ -42,10 +52,16 @@ browser; they are public by design. Everything else is server-side only.
 ## How requests flow
 
 ```
-browser ──POST /api/generate──▶ server/proxy.js ──POST + secret header──▶ n8n webhook
+browser ──sign up / sign in──────────────────────────────────────────▶ Supabase Auth
+browser ──POST /api/generate + Bearer token──▶ server/proxy.js
+                                                  ├─ verify token ──▶ Supabase Auth (/auth/v1/user)
+                                                  ├─ check purchase ──▶ Supabase REST (purchases, as the user)
+                                                  └─ POST + secret header ──▶ n8n webhook
+browser ──Pay $9.99──▶ Stripe Payment Link ──redirect ?checkout=success──▶ browser
+Stripe ──webhook──▶ Supabase Edge Function stripe-webhook ──▶ public.purchases
 ```
 
-The browser only ever talks to its own origin. `WEBHOOK_URL` and the auth secret are read on the
+Apart from Supabase Auth, the browser only talks to its own origin. `WEBHOOK_URL` and the auth secret are read on the
 server and are never bundled into client code. **Do not add a `VITE_` prefix to them**, because
 Vite embeds every `VITE_*` variable into the public JavaScript.
 
@@ -55,18 +71,76 @@ Users sign up with name, email and password, and sign in with Supabase Auth
 (`src/components/AuthForm.tsx`). The app is hidden until they're signed in.
 - The name is sent as `full_name` user metadata. A database trigger copies it into
   `public.profiles` (`id`, `full_name`, `created_at`), which has row-level security so users can only
-  read and update their own row.
+  read and update their own row. The schema is in `supabase/migrations/`; it has already been
+  applied to the project.
 - The browser sends the Supabase access token to `/api/generate`, and the proxy checks it against
   Supabase Auth (`/auth/v1/user`) before forwarding anything to n8n. Signed-out users get 401.
-- Supabase settings (Dashboard → Authentication):
-  - **URL Configuration**: set *Site URL* to the production domain and add
-    `http://localhost:5173` and the Vercel URL(s) to *Redirect URLs*. Confirmation links go there.
-  - **Email confirmation** is on by default. New users must click the emailed link before they can
-    sign in. Supabase's built-in mailer is heavily rate-limited, so configure custom SMTP for production.
+- Users and profiles can be viewed in the Supabase dashboard (project `hrzsfucxziefnjzttiia`):
+  Authentication → Users, and Table Editor → `profiles`.
+
+## Payments
+
+Access costs a one-time $9.99, sold through a Stripe Payment Link.
+1. A signed-in user without a purchase sees the paywall (`src/components/Paywall.tsx`). The
+   "Pay $9.99" button opens `VITE_STRIPE_PAYMENT_LINK_URL` with `client_reference_id=<user id>`
+   and `prefilled_email`.
+2. When checkout completes, Stripe calls the Supabase Edge Function `stripe-webhook`
+   (`supabase/functions/stripe-webhook/index.ts`). It verifies the `Stripe-Signature` header and
+   inserts a row into `public.purchases`, linked to the user by `client_reference_id`.
+   - Only sessions from the Payment Links listed in `ALLOWED_PAYMENT_LINKS` in that file count.
+   - A full refund (`charge.refunded`) sets `refunded_at`, which revokes access.
+3. Stripe redirects to `/?checkout=success`. The app polls `purchases` for up to 60 s until the
+   webhook has landed, then unlocks the studio.
+4. `/api/generate` also checks `purchases` (as the user, through RLS) and returns **402** without an
+   unrefunded purchase, so the paywall can't be bypassed by calling the API directly.
+
+`public.purchases` has RLS. Users can only read their own rows, and only the Edge Function
+(service role) can write. View purchases in the Table Editor → `purchases`.
+
+### Stripe objects (currently test mode)
+
+| Object | ID |
+| --- | --- |
+| Product "Try-On Studio access" | `prod_VX612YqvBGoDUq` (price `price_1UW1p7QuQRTaVdNXDlvfx1wf`, $9.99 one-time) |
+| Payment Link | `plink_1UW1pCQuQRTaVdNXIpm0O9Gr` → `https://buy.stripe.com/test_3cI9AVcgp7K68vrdXd8Ra00`, redirects to production `/?checkout=success` |
+| Webhook endpoint | `we_1UW1q8QuQRTaVdNXnKsOoCl5` → `https://hrzsfucxziefnjzttiia.supabase.co/functions/v1/stripe-webhook` (`checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`) |
+
+The Edge Function needs the secret `STRIPE_WEBHOOK_SECRET` (the endpoint's `whsec_...` signing
+secret), set in Supabase → Edge Functions → Secrets. It is deployed with JWT verification **off**,
+because Stripe doesn't send a Supabase JWT; the Stripe signature authenticates requests instead.
+
+Test-mode links accept only [test cards](https://docs.stripe.com/testing), e.g. `4242 4242 4242 4242`.
+To test checkout locally, temporarily point the Payment Link's redirect at `http://localhost:5173/?checkout=success`.
+
+### Going live
+
+1. Activate the Stripe account. In live mode, create the same product/price, Payment Link (redirect
+   `https://image-app-beta-weld.vercel.app/?checkout=success`) and webhook endpoint (same URL and events).
+2. Add the live `plink_...` ID to `ALLOWED_PAYMENT_LINKS` in the Edge Function and redeploy it.
+3. Set `STRIPE_WEBHOOK_SECRET` to the live endpoint's signing secret.
+4. Set `VITE_STRIPE_PAYMENT_LINK_URL` to the live link in Vercel and redeploy.
+
+### Supabase settings
+
+Dashboard → Authentication → [URL Configuration](https://supabase.com/dashboard/project/hrzsfucxziefnjzttiia/auth/url-configuration):
+
+| Setting | Value |
+| --- | --- |
+| Site URL | `https://image-app-beta-weld.vercel.app` |
+| Redirect URLs | `https://image-app-beta-weld.vercel.app/**`<br>`http://localhost:5173/**` |
+
+The sign-up form sends `emailRedirectTo: window.location.origin`. If that origin isn't in the
+redirect list, Supabase sends the confirmation link to the Site URL instead. Vercel preview
+deployments have their own URLs, so their links go to production unless you add the preview URL too.
+
+**Email confirmation** is on by default. New users must click the emailed link before they can sign
+in. Supabase's built-in mailer only sends a few emails per hour, so set up custom SMTP
+(Authentication → Emails) before real users sign up.
 
 ## Security measures
 
-- `/api/generate` requires a valid Supabase session.
+- `/api/generate` requires a valid Supabase session and a paid, unrefunded purchase.
+- Purchases are written only by the signature-verified Stripe webhook; users can't insert or update them.
 - The webhook URL and secret live server-side only (`.env`, which is gitignored).
 - Optional shared-secret header sent to n8n (`WEBHOOK_AUTH_HEADER` / `WEBHOOK_AUTH_VALUE`).
 - `/api/generate` rejects requests whose `Origin` is not the app's own (or `ALLOWED_ORIGINS`).
@@ -95,6 +169,19 @@ Users sign up with name, email and password, and sign in with Supabase Auth
 
 ## Troubleshooting
 
+**Blank page:** `VITE_SUPABASE_URL` or `VITE_SUPABASE_PUBLISHABLE_KEY` was missing when the app was
+built or started. `src/lib/supabase.ts` throws, and the browser console shows the error. On Vercel,
+add the variables and redeploy.
+
+Sign-in form errors come straight from Supabase:
+
+| Message | Cause |
+| --- | --- |
+| "Email not confirmed" | The user hasn't clicked the confirmation link yet. |
+| "Invalid login credentials" | Wrong email or password, or no account with that email. |
+| "Email rate limit exceeded" | Supabase's built-in mailer limit; wait, or set up custom SMTP. |
+| Confirmation link opens the wrong site | The origin isn't in Redirect URLs (see [Supabase settings](#supabase-settings)). |
+
 The error banner shows the proxy's message:
 
 | Message | Cause |
@@ -105,6 +192,8 @@ The error banner shows the proxy's message:
 | "The image service returned an error (HTTP 404)" | Workflow not activated, or wrong webhook ID. |
 | "The image service returned an error (HTTP 401/403)" | Header Auth in n8n doesn't match `WEBHOOK_AUTH_*`. |
 | "The image service did not return an image" | Workflow doesn't end with Respond to Webhook → Binary File. Server log shows what came back. |
+| "Purchase access to start generating" (402) | No unrefunded row in `purchases` for this user. Check the Stripe webhook deliveries and the `stripe-webhook` function logs. |
+| "Could not check your purchase" (503) | The server couldn't query Supabase for the purchase; check its logs. |
 | "Please sign in to generate images" / "Your session has expired" (401) | Missing or invalid Supabase token, or the server can't reach Supabase (check its logs). |
 | "Too many requests" | Rate limit hit; adjust `RATE_LIMIT_*`. |
 | "Origin not allowed" | Page served from an origin other than the one being called; add it to `ALLOWED_ORIGINS`. |
@@ -121,6 +210,7 @@ security headers.
    and output directory.
 2. Project → Settings → Environment Variables:
    - add `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` (needed at build time and by the function);
+   - add `VITE_STRIPE_PAYMENT_LINK_URL` (needed at build time);
    - add `WEBHOOK_URL`;
    - add `WEBHOOK_AUTH_HEADER` / `WEBHOOK_AUTH_VALUE` if you use Header Auth;
    - add any optional limits.
@@ -133,6 +223,8 @@ security headers.
      `true` here, because Vercel sets `X-Forwarded-For` itself.
    - The CSP in `vercel.json` hardcodes the Supabase project URL in `connect-src`. Update it if the
      project changes. (`server/index.js` builds it from `VITE_SUPABASE_URL`.)
+4. If the production domain changes, update the Site URL and Redirect URLs in
+   [Supabase settings](#supabase-settings).
 
 ### Any Node host
 
