@@ -30,7 +30,12 @@ React 18 + TypeScript SPA (Vite 6, Tailwind v4 via `@tailwindcss/vite`, `lucide-
   - in dev, via `loadEnv(mode, cwd, '')` in `vite.config.ts`;
   - in prod, via `process.env` in `server/index.js`.
   - Never give them a `VITE_` prefix or import them from `src/`, because Vite inlines `VITE_*` into the bundle. After building, `grep -r n8n.cloud dist` should find nothing.
-- **`server/proxy.js` is the single request handler** for both dev and prod.
+- **`server/proxy.js` is the single request handler**, mounted in three places:
+  - the Vite dev plugin (`vite.config.ts`);
+  - the Node server (`server/index.js`, `npm start`);
+  - the Vercel serverless function (`api/generate.js`). Vercel never runs `server/index.js`.
+  - Security headers are duplicated in `server/index.js` and `vercel.json`. Change both.
+  - Vercel caps request and response bodies at 4.5 MB. That's why `src/lib/resize.ts` downscales uploads in the browser before `api.ts` sends them. Keep the per-image target under half that limit.
   - It applies, in order: method, Origin, rate limit, concurrency cap, body size, multipart parse, per-field magic-byte check, then forwards to n8n.
   - Upstream errors are logged; users get generic JSON `{ error }` messages.
   - Config is parsed and validated in `loadConfig()`, which throws on bad config: the prod server exits, and the dev plugin answers 503.
@@ -44,7 +49,7 @@ React 18 + TypeScript SPA (Vite 6, Tailwind v4 via `@tailwindcss/vite`, `lucide-
 - **Client state lives only in `App.tsx`.** The spec's `idle | ready | loading | success | error` state is derived, not stored.
   - `src/lib/api.ts` turns every failure into a user-readable `Error.message`, which the UI renders directly.
   - Object URLs: `ImageDropzone` creates and revokes its preview URL in an effect. `App` revokes the previous result URL through a ref when it changes and on unmount.
-- **Prod security headers** (CSP etc.) are set in `server/index.js`. They are not applied in dev, because Vite HMR needs inline scripts. If you add an external resource (font, CDN, analytics), update the CSP there.
+- **Prod security headers** (CSP etc.) are set in `server/index.js` and `vercel.json`. They are not applied in dev, because Vite HMR needs inline scripts. If you add an external resource (font, CDN, analytics), update the CSP there.
 
 ## n8n gotchas
 

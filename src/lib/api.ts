@@ -1,4 +1,5 @@
 import { ALLOWED_TYPES, sniffImageType } from '../../shared/image-type.js';
+import { prepareForUpload } from './resize';
 
 // Same-origin proxy (server/proxy.js). The real webhook URL never reaches the browser.
 const ENDPOINT = '/api/generate';
@@ -11,9 +12,10 @@ export interface GenerateResult {
 }
 
 export async function generateImage(file1: File, file2: File): Promise<GenerateResult> {
+  const [upload1, upload2] = await Promise.all([prepareForUpload(file1), prepareForUpload(file2)]);
   const formData = new FormData();
-  formData.append('image1', file1);
-  formData.append('image2', file2);
+  formData.append('image1', upload1, 'image1');
+  formData.append('image2', upload2, 'image2');
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -63,7 +65,10 @@ async function readErrorMessage(res: Response): Promise<string> {
     const data = await res.json();
     if (typeof data?.error === 'string') return data.error.slice(0, 300);
   } catch {
-    // fall through
+    // fall through: platform errors (e.g. Vercel's 404/413/504 pages) aren't our JSON
   }
+  if (res.status === 404) return 'The image API was not found on this server (HTTP 404).';
+  if (res.status === 413) return 'The images are too large to upload. Try smaller photos.';
+  if (res.status === 504) return 'The server took too long to respond. Please try again.';
   return `Server returned HTTP ${res.status}.`;
 }

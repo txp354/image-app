@@ -80,7 +80,9 @@ The error banner shows the proxy's message:
 
 | Message | Cause |
 | --- | --- |
-| "Server is not configured" (503, dev only) | `WEBHOOK_URL` missing or invalid in `.env`. The dev console prints the reason. |
+| "Server is not configured" (503) | `WEBHOOK_URL` missing or invalid in `.env` (dev) or in Vercel's environment variables. The dev console / Vercel function logs print the reason. |
+| "The image API was not found on this server (HTTP 404)" | Host isn't running the proxy, e.g. a static-only host, or `api/generate.js` wasn't deployed. |
+| "The images are too large to upload" (413) | Host's body limit exceeded even after downscaling. |
 | "The image service returned an error (HTTP 404)" | Workflow not activated, or wrong webhook ID. |
 | "The image service returned an error (HTTP 401/403)" | Header Auth in n8n doesn't match `WEBHOOK_AUTH_*`. |
 | "The image service did not return an image" | Workflow doesn't end with Respond to Webhook → Binary File. Server log shows what came back. |
@@ -89,7 +91,29 @@ The error banner shows the proxy's message:
 
 ## Deploying
 
-Run `npm run build && npm start` on any Node host. Notes:
+### Vercel
+
+Vercel serves `dist/` as static files and does **not** run `server/index.js`. Instead,
+`api/generate.js` mounts the same proxy as a serverless function, and `vercel.json` adds the
+security headers.
+
+1. Import the GitHub repo in Vercel. `vercel.json` already sets the framework, build command
+   and output directory.
+2. Project → Settings → Environment Variables:
+   - add `WEBHOOK_URL`;
+   - add `WEBHOOK_AUTH_HEADER` / `WEBHOOK_AUTH_VALUE` if you use Header Auth;
+   - add any optional limits.
+   - Then **redeploy**, because env vars only apply to new deployments.
+3. Vercel limits:
+   - **Request bodies are capped at 4.5 MB.** The browser therefore downscales photos over ~1.8 MB to at most
+     2048px (WebP, or JPEG as a fallback) before uploading (`src/lib/resize.ts`).
+   - The response from n8n must also stay under 4.5 MB.
+   - Rate limiting is per function instance, so it is a best-effort limit. `TRUST_PROXY` defaults to
+     `true` here, because Vercel sets `X-Forwarded-For` itself.
+
+### Any Node host
+
+Run `npm run build && npm start`. Notes:
 - Set `HOST=0.0.0.0` if the platform requires it.
 - Serve it over HTTPS (normally via the platform or a reverse proxy).
 - Set `TRUST_PROXY=true` when behind one, so rate limiting sees real client IPs.
